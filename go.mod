@@ -1,4 +1,4 @@
-module github.com/your-username/axiom
+module github.com/nkosikhumalo/axiom
 
 go 1.22
 
