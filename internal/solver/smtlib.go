@@ -27,6 +27,7 @@ func Build(q Query) string {
 
 	b.WriteString("; Axiom equivalence check\n")
 	b.WriteString("; UNSAT = equivalent | SAT = logic drift detected\n\n")
+	b.WriteString("(set-option :timeout 5000)\n\n")
 
 	// Declare shared symbolic input variables
 	for _, v := range q.Variables {
@@ -34,8 +35,14 @@ func Build(q Query) string {
 	}
 
 	b.WriteString("\n; Define function outputs as symbolic expressions\n")
-	fmt.Fprintf(&b, "(define-fun legacy_out () Int\n  %s\n)\n\n", q.Legacy)
-	fmt.Fprintf(&b, "(define-fun modern_out () Int\n  %s\n)\n\n", q.Modern)
+	legacyType := inferSMTType(q.Legacy)
+	modernType := inferSMTType(q.Modern)
+	if legacyType != modernType {
+		legacyType = "Int"
+		modernType = "Int"
+	}
+	fmt.Fprintf(&b, "(define-fun legacy_out () %s\n  %s\n)\n\n", legacyType, q.Legacy)
+	fmt.Fprintf(&b, "(define-fun modern_out () %s\n  %s\n)\n\n", modernType, q.Modern)
 
 	// Assert negation of equivalence — Z3 tries to find a counterexample
 	b.WriteString("; Assert: legacy != modern (negation of equivalence)\n")
@@ -46,20 +53,61 @@ func Build(q Query) string {
 	return b.String()
 }
 
+func inferSMTType(expr string) string {
+	tokens := tokenize(expr)
+	if len(tokens) == 0 {
+		return "Int"
+	}
+	if tokens[0] == "true" || tokens[0] == "false" {
+		return "Bool"
+	}
+	switch tokens[0] {
+	case "=", "distinct", "<", ">", "<=", ">=", "and", "or", "not":
+		return "Bool"
+	case "ite":
+		if len(tokens) > 2 && (tokens[2] == "true" || tokens[2] == "false") {
+			return "Bool"
+		}
+	}
+	return "Int"
+}
+
 // ExtractVars scans both SMT expressions and returns all unique symbolic
 // variable names (single-word tokens that are not SMT keywords or numbers).
 func ExtractVars(legacy, modern string) []Variable {
 	seen := map[string]bool{}
+	boolVars := inferBoolVars(legacy + " " + modern)
 	var vars []Variable
 
 	for _, token := range tokenize(legacy + " " + modern) {
 		if !seen[token] && isUserVar(token) {
 			seen[token] = true
-			vars = append(vars, Variable{Name: token, SMTType: "Int"})
+			smtType := "Int"
+			if boolVars[token] {
+				smtType = "Bool"
+			}
+			vars = append(vars, Variable{Name: token, SMTType: smtType})
 		}
 	}
 
 	return vars
+}
+
+func inferBoolVars(s string) map[string]bool {
+	boolVars := map[string]bool{}
+	tokens := tokenize(s)
+	for index, token := range tokens {
+		if index == 0 {
+			continue
+		}
+		previous := tokens[index-1]
+		if previous == "not" || previous == "and" || previous == "or" || previous == "ite" {
+			if isUserVar(token) {
+				boolVars[token] = true
+			}
+		}
+	}
+	return boolVars
 }
 
 // smtKeywords are SMT-LIB2 reserved tokens we don't want to declare as variables.
