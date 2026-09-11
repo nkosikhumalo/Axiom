@@ -2,6 +2,7 @@ package symbolic
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/nkosikhumalo/axiom/internal/ast"
@@ -38,7 +39,31 @@ func ExtractPaths(root *ast.Node) []PathConstraint {
 	}
 
 	var paths []PathConstraint
-	collectPaths(body, nil, &paths)
+	collectPaths(body, nil, nil, &paths)
+	return paths
+}
+
+// ExtractPathsForFunction extracts paths from the named function or method.
+// It returns no paths when the symbol cannot be found, allowing callers to
+// reject ambiguous or misspelled entry points instead of analyzing a random
+// function in the file.
+func ExtractPathsForFunction(root *ast.Node, name string) []PathConstraint {
+	function := findFunction(root, name)
+	if function == nil {
+		return nil
+	}
+	body := ast.ChildByField(function, "body")
+	if body == nil {
+		body = ast.ChildByField(function, "block")
+	}
+	if body == nil {
+		body = findFunctionBody(function)
+	}
+	if body == nil {
+		return nil
+	}
+	var paths []PathConstraint
+	collectPaths(body, nil, nil, &paths)
 	return paths
 }
 
@@ -80,32 +105,47 @@ func conjoin(conds []string) string {
 }
 
 // collectPaths recursively walks the AST, accumulating branch conditions.
-func collectPaths(node *ast.Node, activeConds []string, out *[]PathConstraint) {
+func collectPaths(node *ast.Node, activeConds []string, env map[string]*Expression, out *[]PathConstraint) bool {
 	if node == nil {
-		return
+		return false
+	}
+	if env == nil {
+		env = map[string]*Expression{}
+	}
+
+	if node.Type == "block" || node.Type == "compound_statement" || node.Type == "function_body" {
+		for _, child := range node.Children {
+			if collectPaths(child, activeConds, env, out) {
+				return true
+			}
+		}
+		return false
 	}
 
 	switch node.Type {
 	case "if_statement":
-		collectIfStatement(node, activeConds, out)
-		return // children handled inside
+		return collectIfStatement(node, activeConds, env, out)
+	case "expression_switch_statement", "switch_statement":
+		return collectSwitchStatement(node, activeConds, env, out)
 
 	case "return_statement":
 		retExpr := extractReturnExpr(node)
+		retExpr = substituteSMT(retExpr, env)
 		*out = append(*out, PathConstraint{
 			Conditions: copyConds(activeConds),
 			ReturnExpr: retExpr,
 			Line:       node.StartLine,
 		})
-		return
+		return true
 	}
 
-	for _, child := range node.Children {
-		collectPaths(child, activeConds, out)
+	if applyAssignment(node, env) {
+		return false
 	}
+	return false
 }
 
-func collectIfStatement(node *ast.Node, activeConds []string, out *[]PathConstraint) {
+func collectIfStatement(node *ast.Node, activeConds []string, env map[string]*Expression, out *[]PathConstraint) bool {
 	condNode := ast.ChildByField(node, "condition")
 	if condNode == nil {
 		// Fallback: look for parenthesized_expression child (C++ style)
@@ -120,7 +160,7 @@ func collectIfStatement(node *ast.Node, activeConds []string, out *[]PathConstra
 	var condSMT string
 	if condNode != nil {
 		inner := unwrapCondition(condNode)
-		condSMT = buildConditionSMT(inner)
+		condSMT = substituteSMT(buildConditionSMT(inner), env)
 	} else {
 		condSMT = "true"
 	}
@@ -130,9 +170,10 @@ func collectIfStatement(node *ast.Node, activeConds []string, out *[]PathConstra
 	if thenNode == nil {
 		thenNode = ast.ChildByField(node, "body")
 	}
+	thenTerminates := false
 	if thenNode != nil {
 		thenConds := append(copyConds(activeConds), condSMT)
-		collectPaths(thenNode, thenConds, out)
+		thenTerminates = collectPaths(thenNode, thenConds, copyEnv(env), out)
 	}
 
 	// Else branch
@@ -143,12 +184,162 @@ func collectIfStatement(node *ast.Node, activeConds []string, out *[]PathConstra
 		// The else child may be another if_statement or a block
 		for _, c := range elseNode.Children {
 			if c.Type == "if_statement" {
-				collectIfStatement(c, elseConds, out)
-				return
+				return thenTerminates && collectIfStatement(c, elseConds, copyEnv(env), out)
 			}
 		}
-		collectPaths(elseNode, elseConds, out)
+		return thenTerminates && collectPaths(elseNode, elseConds, copyEnv(env), out)
 	}
+	return false
+}
+
+func applyAssignment(node *ast.Node, env map[string]*Expression) bool {
+	if node.Type != "expression_statement" && node.Type != "assignment_statement" && node.Type != "short_var_declaration" {
+		return false
+	}
+	assignment := ast.ChildByField(node, "expression")
+	if assignment == nil {
+		assignment = node
+	}
+	if assignment.Type != "assignment_expression" && assignment.Type != "short_var_declaration" {
+		for _, child := range node.Children {
+			if child.Type == "assignment_expression" || child.Type == "short_var_declaration" {
+				assignment = child
+				break
+			}
+		}
+	}
+	if assignment == nil {
+		return false
+	}
+	left := ast.ChildByField(assignment, "left")
+	right := ast.ChildByField(assignment, "right")
+	if left == nil || right == nil {
+		return false
+	}
+	if left.Type == "expression_list" && len(left.Children) == 1 {
+		left = left.Children[0]
+	}
+	if right.Type == "expression_list" && len(right.Children) == 1 {
+		right = right.Children[0]
+	}
+	if left.Type != "identifier" {
+		return false
+	}
+	value := BuildExpression(right)
+	if value == nil {
+		return false
+	}
+	env[left.Content] = substituteExpression(value, env)
+	return true
+}
+
+func collectSwitchStatement(node *ast.Node, activeConds []string, env map[string]*Expression, out *[]PathConstraint) bool {
+	valueNode := ast.ChildByField(node, "value")
+	if valueNode == nil {
+		return false
+	}
+	switchValue := BuildExpression(valueNode)
+	if switchValue == nil {
+		return false
+	}
+	var cases []*ast.Node
+	for _, child := range node.Children {
+		if child.Type == "expression_case" || child.Type == "case" || child.Type == "default_case" {
+			cases = append(cases, child)
+		}
+	}
+	if len(cases) == 0 {
+		return false
+	}
+	var caseConditions []string
+	hasDefault := false
+	allTerminate := true
+	for _, caseNode := range cases {
+		caseCond := ""
+		if caseNode.Type == "default_case" {
+			hasDefault = true
+			if len(caseConditions) > 0 {
+				caseCond = fmt.Sprintf("(not (or %s))", strings.Join(caseConditions, " "))
+			} else {
+				caseCond = "true"
+			}
+		} else {
+			value := ast.ChildByField(caseNode, "value")
+			if value == nil {
+				continue
+			}
+			var values []*ast.Node
+			if value.Type == "expression_list" {
+				values = value.Children
+			} else {
+				values = []*ast.Node{value}
+			}
+			var alternatives []string
+			for _, item := range values {
+				if expr := BuildExpression(item); expr != nil {
+					alternatives = append(alternatives, fmt.Sprintf("(= %s %s)", switchValue.ToSMT(), expr.ToSMT()))
+				}
+			}
+			if len(alternatives) == 1 {
+				caseCond = alternatives[0]
+			} else if len(alternatives) > 1 {
+				caseCond = fmt.Sprintf("(or %s)", strings.Join(alternatives, " "))
+			}
+			if caseCond != "" {
+				caseConditions = append(caseConditions, caseCond)
+			}
+		}
+		if caseCond == "" {
+			continue
+		}
+		caseEnv := copyEnv(env)
+		caseConds := append(copyConds(activeConds), substituteSMT(caseCond, env))
+		caseTerminates := false
+		for _, child := range caseNode.Children {
+			if child.Type != "case" && child.Type != "default" && child.Type != ":" && child.Type != "expression_list" {
+				if collectPaths(child, caseConds, caseEnv, out) {
+					caseTerminates = true
+					break
+				}
+			}
+		}
+		allTerminate = allTerminate && caseTerminates
+	}
+	return hasDefault && allTerminate
+}
+
+func copyEnv(src map[string]*Expression) map[string]*Expression {
+	dst := make(map[string]*Expression, len(src))
+	for name, expr := range src {
+		dst[name] = expr
+	}
+	return dst
+}
+
+func substituteExpression(expr *Expression, env map[string]*Expression) *Expression {
+	if expr == nil {
+		return nil
+	}
+	if expr.Kind == "var" {
+		if replacement, ok := env[expr.Value]; ok {
+			return replacement
+		}
+	}
+	result := *expr
+	result.Left = substituteExpression(expr.Left, env)
+	result.Right = substituteExpression(expr.Right, env)
+	return &result
+}
+
+func substituteSMT(s string, env map[string]*Expression) string {
+	if len(env) == 0 {
+		return s
+	}
+	for name, expr := range env {
+		pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+		s = pattern.ReplaceAllString(s, expr.ToSMT())
+	}
+	return s
 }
 
 func extractReturnExpr(node *ast.Node) string {
@@ -241,6 +432,31 @@ func findFunctionBody(root *ast.Node) *ast.Node {
 		}
 	}
 	return nil
+}
+
+func findFunction(root *ast.Node, name string) *ast.Node {
+	for _, nodeType := range []string{"function_declaration", "function_definition", "method_declaration", "constructor_declaration"} {
+		for _, node := range ast.FindAll(root, nodeType) {
+			if functionName(node) == name {
+				return node
+			}
+		}
+	}
+	return nil
+}
+
+func functionName(node *ast.Node) string {
+	if name := ast.ChildByField(node, "name"); name != nil {
+		return name.Content
+	}
+	if declarator := ast.ChildByField(node, "declarator"); declarator != nil {
+		for _, nodeType := range []string{"identifier", "field_identifier", "name"} {
+			if name := ast.FindFirst(declarator, nodeType); name != nil {
+				return name.Content
+			}
+		}
+	}
+	return ""
 }
 
 func stripParens(node *ast.Node) *ast.Node {
