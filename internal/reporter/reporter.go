@@ -61,13 +61,18 @@ func Report(result *solver.Result, legacyFile, modernFile string) {
 // parseModel extracts `(define-fun varName () Type value)` entries from the Z3 model
 // and formats them as readable "varName = value" strings.
 func parseModel(model string) []string {
-	re := regexp.MustCompile(`\(define-fun\s+(\S+)\s+\(\)\s+\S+\s+([^)]+)\)`)
-	matches := re.FindAllStringSubmatch(model, -1)
+	re := regexp.MustCompile(`\(define-fun\s+(\S+)\s+\(\)\s+\S+\s+`)
+	matches := re.FindAllStringSubmatchIndex(model, -1)
 
 	var result []string
-	for _, m := range matches {
-		name := strings.TrimSpace(m[1])
-		value := strings.TrimSpace(m[2])
+	for _, match := range matches {
+		name := model[match[2]:match[3]]
+		valueStart := match[1]
+		valueEnd := balancedExpressionEnd(model, valueStart)
+		if valueEnd == -1 {
+			continue
+		}
+		value := strings.TrimSpace(model[valueStart:valueEnd])
 		// Skip internal Z3 names and function output definitions
 		if strings.HasPrefix(name, "legacy_") || strings.HasPrefix(name, "modern_") {
 			continue
@@ -75,4 +80,37 @@ func parseModel(model string) []string {
 		result = append(result, fmt.Sprintf("%s = %s", name, value))
 	}
 	return result
+}
+
+func balancedExpressionEnd(model string, start int) int {
+	depth := 0
+	started := false
+	for index := start; index < len(model); index++ {
+		switch model[index] {
+		case '(':
+			depth++
+			started = true
+		case ')':
+			if started {
+				depth--
+				if depth == 0 {
+					return index + 1
+				}
+			} else {
+				return index
+			}
+		case '\n':
+			if !started {
+				return index
+			}
+		}
+	}
+	if !started {
+		lineEnd := strings.IndexByte(model[start:], '\n')
+		if lineEnd >= 0 {
+			return start + lineEnd
+		}
+		return len(model)
+	}
+	return -1
 }
