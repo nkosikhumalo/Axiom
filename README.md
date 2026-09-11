@@ -89,6 +89,26 @@ go mod download
 go run main.go --legacy=./examples/legacy_discount.cpp --modern=./examples/modern_discount.go
 ```
 
+### Interactive Mode
+
+Run Axiom without flags in a terminal to open the keyboard-driven workflow selector:
+
+```bash
+./axiom
+```
+
+Use the arrow keys and Enter to choose project analysis, refactoring, project verification, or single-file verification. Automated environments should continue using the flag-based commands because interactive mode requires a terminal.
+
+To generate an isolated improved Java version of a selected method:
+
+```bash
+./axiom --project /path/to/project \
+  --entry 'com.example.Service.calculate(int)' \
+  --refactor --rewrite --approve-refactor
+```
+
+The generated source is written under `.axiom/generated/java/` and is never applied to the original project automatically.
+
 ---
 
 ## Real-World Verification Example
