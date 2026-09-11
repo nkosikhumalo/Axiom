@@ -29,6 +29,8 @@ func (e *Expression) ToSMT() string {
 		return fmt.Sprintf("(%s %s %s)", op, e.Left.ToSMT(), e.Right.ToSMT())
 	case "unop":
 		return fmt.Sprintf("(%s %s)", e.Value, e.Left.ToSMT())
+	case "ite":
+		return fmt.Sprintf("(ite %s %s %s)", e.Left.ToSMT(), e.Right.ToSMT(), e.Value)
 	default:
 		return e.Value
 	}
@@ -63,10 +65,25 @@ func BuildExpression(node *ast.Node) *Expression {
 	case "binary_expression", "binary_operator":
 		return buildBinary(node)
 
+	case "conditional_expression", "ternary_expression":
+		return buildConditional(node)
+
+	case "cast_expression", "type_cast_expression", "type_conversion_expression", "conversion_expression":
+		// For the supported SMT sorts, a cast changes the static type but not
+		// the symbolic value being compared or returned.
+		for _, child := range node.Children {
+			if child.Type != "(" && child.Type != ")" && child.Type != "[" && child.Type != "]" {
+				if expr := BuildExpression(child); expr != nil && expr.Kind != "literal" {
+					return expr
+				}
+			}
+		}
+		return nil
+
 	case "unary_expression":
 		return buildUnary(node)
 
-	case "call_expression":
+	case "call_expression", "method_invocation":
 		// Treat function calls as opaque symbolic variables for now
 		return &Expression{Kind: "var", Value: sanitizeIdent(node.Content)}
 
@@ -80,6 +97,14 @@ func BuildExpression(node *ast.Node) *Expression {
 }
 
 func buildBinary(node *ast.Node) *Expression {
+	if leftNode := ast.ChildByField(node, "left"); leftNode != nil {
+		opNode := ast.ChildByField(node, "operator")
+		rightNode := ast.ChildByField(node, "right")
+		if opNode != nil && rightNode != nil {
+			return &Expression{Kind: "binop", Value: opNode.Content, Left: BuildExpression(leftNode), Right: BuildExpression(rightNode)}
+		}
+	}
+
 	expr := &Expression{Kind: "binop"}
 	for _, child := range node.Children {
 		switch child.Type {
@@ -103,6 +128,39 @@ func buildBinary(node *ast.Node) *Expression {
 		expr.Value = "+"
 	}
 	return expr
+}
+
+func buildConditional(node *ast.Node) *Expression {
+	condition := ast.ChildByField(node, "condition")
+	consequence := ast.ChildByField(node, "consequence")
+	alternative := ast.ChildByField(node, "alternative")
+	if condition == nil || consequence == nil || alternative == nil {
+		var parts []*ast.Node
+		for _, child := range node.Children {
+			switch child.Type {
+			case "?", ":":
+				continue
+			default:
+				parts = append(parts, child)
+			}
+		}
+		if len(parts) == 3 {
+			condition, consequence, alternative = parts[0], parts[1], parts[2]
+		}
+	}
+	if condition == nil || consequence == nil || alternative == nil {
+		return nil
+	}
+	alternativeExpr := BuildExpression(alternative)
+	if alternativeExpr == nil {
+		return nil
+	}
+	return &Expression{
+		Kind:  "ite",
+		Left:  BuildExpression(condition),
+		Right: BuildExpression(consequence),
+		Value: alternativeExpr.ToSMT(),
+	}
 }
 
 func buildUnary(node *ast.Node) *Expression {
@@ -141,5 +199,6 @@ func sanitizeIdent(s string) string {
 	s = strings.ReplaceAll(s, "(", "_")
 	s = strings.ReplaceAll(s, ")", "_")
 	s = strings.ReplaceAll(s, " ", "_")
+	s = strings.ReplaceAll(s, ".", "_")
 	return s
 }
