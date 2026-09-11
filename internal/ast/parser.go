@@ -60,6 +60,9 @@ func Parse(source []byte, lang Language) (*ParsedTree, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
+	if tree.RootNode().HasError() {
+		return nil, fmt.Errorf("syntax errors detected while parsing %s", lang)
+	}
 
 	return &ParsedTree{
 		Tree:     tree,
@@ -73,7 +76,7 @@ func detectLanguage(path string) (Language, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".go":
 		return LangGo, nil
-	case ".cpp", ".cc", ".cxx", ".c":
+	case ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp":
 		return LangCPP, nil
 	case ".java":
 		return LangJava, nil
