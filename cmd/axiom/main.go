@@ -42,10 +42,10 @@ var rootCmd = &cobra.Command{
 	Use:   "axiom",
 	Short: "Axiom — formal verification engine for legacy rewrites",
 	Long:  `Mathematically prove 100% logic equivalence when rewriting legacy code into modern languages.`,
-	RunE:  run,
 }
 
 func init() {
+	rootCmd.RunE = run
 	rootCmd.Flags().StringVar(&legacyFile, "legacy", "", "Path to legacy source file (e.g. discount.cpp)")
 	rootCmd.Flags().StringVar(&modernFile, "modern", "", "Path to modern source file (e.g. discount.go)")
 	rootCmd.Flags().StringVar(&projectDir, "project", "", "Analyze a source project and build its dependency graph")
