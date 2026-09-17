@@ -19,15 +19,6 @@ type PathConstraint struct {
 	Line uint32
 }
 
-// ToSMT renders this path as an SMT-LIB2 `(=> conditions return)` implication.
-func (pc PathConstraint) ToSMT() string {
-	if len(pc.Conditions) == 0 {
-		return pc.ReturnExpr
-	}
-	cond := conjoin(pc.Conditions)
-	return fmt.Sprintf("(ite %s %s %%ELSE%%)", cond, pc.ReturnExpr)
-}
-
 // ExtractPaths walks an AST root and returns all execution paths with their
 // return expressions. The result is ordered from most-specific (deepest nesting)
 // to default (unconditional fallthrough).
