@@ -22,12 +22,8 @@ type JavaMethod struct {
 	Body       string
 }
 
-// FromJavaAST converts an indexed Java symbol and its AST declaration into an intermediate method.
-func FromJavaAST(symbol project.Symbol, declaration *ast.Node) (*JavaMethod, error) {
-	return FromJavaASTWithContext(symbol, declaration, nil, nil)
-}
-
-// FromJavaASTWithContext adds the imports and fields needed by the selected class.
+// FromJavaASTWithContext converts an indexed Java symbol and its AST declaration into an
+// intermediate method, including any imports and fields needed by the selected class.
 func FromJavaASTWithContext(symbol project.Symbol, declaration *ast.Node, imports, fields []string) (*JavaMethod, error) {
 	if declaration == nil {
 		return nil, fmt.Errorf("method declaration is nil")
