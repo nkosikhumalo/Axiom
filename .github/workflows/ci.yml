@@ -15,6 +15,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Install Z3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3
+          z3 --version
       - run: go test ./...
       - run: go vet ./...
       - run: go build ./cmd/axiom
