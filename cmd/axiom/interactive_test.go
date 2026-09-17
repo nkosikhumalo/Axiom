@@ -1,12 +1,82 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	projectindex "github.com/nkosikhumalo/axiom/internal/project"
 )
+
+type interactiveScope int
+
+const (
+	interactiveMain  interactiveScope = iota
+	interactiveTests
+)
+
+func uniqueEntries(entries []string) []string {
+	seen := map[string]bool{}
+	var result []string
+	for _, e := range entries {
+		if !seen[e] {
+			seen[e] = true
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+func directoryExists(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("path does not exist: %s", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path is not a directory: %s", path)
+	}
+	return nil
+}
+
+func fileExists(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("file does not exist: %s", path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("path is a directory, not a file: %s", path)
+	}
+	return nil
+}
+
+func hasSelectableEntry(file projectindex.File) bool {
+	for _, sym := range file.Symbols {
+		if sym.Kind == "method" || sym.Kind == "constructor" || sym.Kind == "function" {
+			return true
+		}
+	}
+	return false
+}
+
+func fileInScope(file projectindex.File, scope interactiveScope) bool {
+	path := file.Path
+	isTest := strings.Contains(path, "src/test/") ||
+		strings.Contains(path, "_test.go") ||
+		strings.HasSuffix(path, "Test.java") ||
+		strings.HasSuffix(path, "Tests.java") ||
+		strings.HasSuffix(path, "Spec.java")
+
+	switch scope {
+	case interactiveMain:
+		return !isTest
+	case interactiveTests:
+		return isTest
+	default:
+		return true
+	}
+}
 
 func TestSelectEntryDeduplicatesSymbols(t *testing.T) {
 	entries := []string{"Service.run()", "Service.run()", "Service.other()"}
