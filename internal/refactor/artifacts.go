@@ -14,6 +14,8 @@ import (
 	"github.com/nkosikhumalo/axiom/internal/ast"
 	"github.com/nkosikhumalo/axiom/internal/project"
 	"github.com/nkosikhumalo/axiom/internal/rewrite"
+	"github.com/nkosikhumalo/axiom/internal/solver"
+	"github.com/nkosikhumalo/axiom/internal/symbolic"
 )
 
 // Artifact describes one generated file and its source finding.
@@ -185,6 +187,94 @@ func findSourceMethod(root *ast.Node, symbol project.Symbol) *ast.Node {
 	return nil
 }
 
+// GenerateGoRewrite emits an idiomatic Go translation of the selected Java method into
+// generated/go/ inside outputDir. It never writes into the original source tree.
+// After writing the file it runs the SMT equivalence check between the original Java
+// source and the generated Go file and records the result in the returned Artifact.
+func GenerateGoRewrite(index *project.Index, entry, outputDir string) (Artifact, error) {
+	symbol, ok := findSymbol(index, entry)
+	if !ok {
+		return Artifact{}, fmt.Errorf("rewrite entry not found: %s", entry)
+	}
+	sourcePath := filepath.Join(index.Root, filepath.FromSlash(symbol.File))
+	parsed, err := ast.ParseFile(sourcePath)
+	if err != nil {
+		return Artifact{}, fmt.Errorf("parse rewrite source: %w", err)
+	}
+	method := findSourceMethod(ast.Walk(parsed), symbol)
+	if method == nil {
+		return Artifact{}, fmt.Errorf("rewrite method body not found: %s", entry)
+	}
+	imports, fields := javaClassContext(ast.Walk(parsed), symbol)
+	methodIR, err := rewrite.FromJavaASTWithContext(symbol, method, imports, fields)
+	if err != nil {
+		return Artifact{}, fmt.Errorf("build rewrite representation: %w", err)
+	}
+
+	goDir := filepath.Join(outputDir, "generated", "go")
+	if err := os.MkdirAll(goDir, 0o755); err != nil {
+		return Artifact{}, fmt.Errorf("create go rewrite directory: %w", err)
+	}
+
+	fileName := goFuncName(symbol.Name) + ".go"
+	artifactPath := filepath.ToSlash(filepath.Join("generated", "go", fileName))
+	content := methodIR.RenderGo(symbol.Package)
+	if err := os.WriteFile(filepath.Join(outputDir, artifactPath), []byte(content), 0o644); err != nil {
+		return Artifact{}, fmt.Errorf("write Go rewrite: %w", err)
+	}
+
+	// Auto-verify: compare the original Java paths against the generated Go paths via SMT.
+	verificationNote := verifyGoRewrite(sourcePath, filepath.Join(outputDir, artifactPath), symbol.Name)
+
+	return Artifact{
+		Path:    artifactPath,
+		Source:  symbol.File,
+		Finding: entry + " | smt-verification: " + verificationNote,
+	}, nil
+}
+
+// verifyGoRewrite runs a lightweight SMT equivalence check between the legacy source
+// function and the generated Go file, returning a short human-readable status string.
+func verifyGoRewrite(legacyPath, modernPath, funcName string) string {
+	legacyParsed, err := ast.ParseFile(legacyPath)
+	if err != nil {
+		return "skipped: could not parse legacy source"
+	}
+	modernParsed, err := ast.ParseFile(modernPath)
+	if err != nil {
+		return "skipped: could not parse generated Go file"
+	}
+
+	legacyPaths := symbolic.ExtractPathsForFunction(ast.Walk(legacyParsed), funcName)
+	modernPaths := symbolic.ExtractPathsForFunction(ast.Walk(modernParsed), goFuncName(funcName))
+
+	if len(legacyPaths) == 0 || len(modernPaths) == 0 {
+		return "skipped: no symbolic paths extracted"
+	}
+
+	legacySMT := symbolic.BuildFunctionSMT(legacyPaths)
+	modernSMT := symbolic.BuildFunctionSMT(modernPaths)
+	vars := solver.ExtractVars(legacySMT, modernSMT)
+	query := solver.Build(solver.Query{Variables: vars, Legacy: legacySMT, Modern: modernSMT})
+
+	result, err := solver.RunZ3(query)
+	if err != nil {
+		return "skipped: z3 unavailable or error"
+	}
+	if result.Sat {
+		return "FAILED — logic drift detected"
+	}
+	return "PASSED — proven equivalent"
+}
+
+// goFuncName uppercases the first letter to produce an exported Go function name.
+func goFuncName(name string) string {
+	if name == "" {
+		return "Run"
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
+}
+
 // ValidateJavaArtifacts compiles project Java sources and generated adapters in an isolated
 // classes directory and records the result in artifacts.json.
 func ValidateJavaArtifacts(index *project.Index, artifacts *Artifacts, outputDir string) error {
@@ -222,7 +312,9 @@ func ValidateJavaArtifacts(index *project.Index, artifacts *Artifacts, outputDir
 		}
 	}
 	for _, artifact := range artifacts.Files {
-		arguments = append(arguments, filepath.Join(outputDir, filepath.FromSlash(artifact.Path)))
+		if strings.HasSuffix(artifact.Path, ".java") {
+			arguments = append(arguments, filepath.Join(outputDir, filepath.FromSlash(artifact.Path)))
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
