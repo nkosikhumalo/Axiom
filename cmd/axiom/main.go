@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/nkosikhumalo/axiom/internal/ast"
 	projectindex "github.com/nkosikhumalo/axiom/internal/project"
@@ -34,6 +35,7 @@ var (
 	refactorOut     string
 	approveRefactor bool
 	rewriteMode     bool
+	targetLang      string
 	reportFormat    string
 	reportOutput    string
 )
@@ -60,7 +62,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&refactorMode, "refactor", false, "Generate a non-destructive refactoring plan for a project")
 	rootCmd.Flags().StringVar(&refactorOut, "refactor-output", "", "Path for the refactoring plan Markdown artifact")
 	rootCmd.Flags().BoolVar(&approveRefactor, "approve-refactor", false, "Approve generation of Java scaffolds and patches")
-	rootCmd.Flags().BoolVar(&rewriteMode, "rewrite", false, "Generate an isolated Java rewrite of the selected entry method")
+	rootCmd.Flags().BoolVar(&rewriteMode, "rewrite", false, "Generate an isolated rewrite of the selected entry method")
+	rootCmd.Flags().StringVar(&targetLang, "target-lang", "java", "Target language for rewrite output: java or go")
 	rootCmd.Flags().StringVar(&reportFormat, "format", "text", "Report format: text, json, or sarif")
 	rootCmd.Flags().StringVar(&reportOutput, "report", "", "Path for a machine-readable report")
 }
@@ -289,12 +292,23 @@ func analyzeProject(root, output, entry string, refactorMode bool, refactorOutpu
 				return err
 			}
 			if rewriteMode && entry != "" {
-				rewrite, err := refactor.GenerateJavaRewrite(index, entry, artifactDir)
-				if err != nil {
-					return err
+				switch targetLang {
+				case "go":
+					goRewrite, err := refactor.GenerateGoRewrite(index, entry, artifactDir)
+					if err != nil {
+						return err
+					}
+					artifacts.Files = append(artifacts.Files, goRewrite)
+					fmt.Printf("[AXIOM] Go rewrite generated at %s\n", fileLink(filepath.Join(artifactDir, filepath.FromSlash(goRewrite.Path))))
+					fmt.Printf("[AXIOM] SMT verification: %s\n", goRewrite.Finding[strings.Index(goRewrite.Finding, "smt-verification: ")+len("smt-verification: "):])
+				default:
+					rewrite, err := refactor.GenerateJavaRewrite(index, entry, artifactDir)
+					if err != nil {
+						return err
+					}
+					artifacts.Files = append(artifacts.Files, rewrite)
+					fmt.Printf("[AXIOM] Improved Java rewrite generated at %s\n", fileLink(filepath.Join(artifactDir, filepath.FromSlash(rewrite.Path))))
 				}
-				artifacts.Files = append(artifacts.Files, rewrite)
-				fmt.Printf("[AXIOM] Improved Java rewrite generated at %s\n", fileLink(filepath.Join(artifactDir, filepath.FromSlash(rewrite.Path))))
 			}
 			fmt.Printf("[AXIOM] Approved artifacts generated: %d files under %s\n", len(artifacts.Files), artifactDir)
 			if err := refactor.ValidateJavaArtifacts(index, &artifacts, artifactDir); err != nil {
